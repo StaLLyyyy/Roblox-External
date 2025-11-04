@@ -1,0 +1,1527 @@
+import time
+import struct
+import math
+import psutil
+import ctypes
+import win32gui
+import win32api
+import win32con
+import traceback
+import win32process
+import requests
+import threading
+import tkinter as tk
+from tkinter import ttk
+
+from ctypes import wintypes
+
+OFFSETS_URL = "https://robloxoffsets.com/offsets.json"
+
+def load_offsets():
+    global OFFSETS, OFFSETS_INT
+    try:
+        resp = requests.get(OFFSETS_URL, timeout=5)
+        resp.raise_for_status()
+        OFFSETS = resp.json()
+        OFFSETS_INT = {}
+        for k, v in OFFSETS.items():
+            if isinstance(v, str) and v.startswith('0x'):
+                try:
+                    OFFSETS_INT[k] = int(v, 16)
+                except ValueError:
+                    pass
+        print(f"Offsets loaded successfully. Roblox Version: {OFFSETS.get('RobloxVersion', 'Unknown')}")
+        return True
+    except Exception as e:
+        print(f"Failed to load offsets: {e}")
+        return False
+
+OFFSETS = {}
+OFFSETS_INT = {}
+load_offsets()
+
+
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("th32Usage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(wintypes.DWORD)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("th32Threads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_char * 260)
+    ]
+
+class MODULEENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("th32ModuleID", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD),
+        ("ProccntUsage", wintypes.DWORD),
+        ("modBaseAddr", ctypes.POINTER(wintypes.BYTE)),
+        ("modBaseSize", wintypes.DWORD),
+        ("hModule", wintypes.HMODULE),
+        ("szModule", ctypes.c_char * 256),
+        ("szExePath", ctypes.c_char * 260)
+    ]
+
+class vec2:
+    def __init__(self, x=0.0, y=0.0):
+        self.x = x
+        self.y = y
+
+class vec3:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x = x
+        self.y = y
+        self.z = z
+
+class SIZE(ctypes.Structure):
+    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+
+class ESPConfig:
+    def __init__(self):
+        self.enable_box = True
+        self.enable_skeleton = True
+        self.enable_head_circle = True
+        self.enable_name = True
+        self.enable_health = True
+        self.enable_tool = True
+        self.enable_distance = True
+        self.box_color = (255, 255, 255)
+        self.box_outline_color = (0, 0, 0)
+        self.skeleton_color = (255, 255, 255)
+        self.skeleton_outline_color = (0, 0, 0)
+        self.circle_color = (255, 255, 255)
+        self.circle_outline_color = (0, 0, 0)
+        self.name_color = (255, 255, 255)
+        self.name_outline_color = (0, 0, 0)
+        self.tool_color = (255, 200, 0)
+        self.tool_outline_color = (0, 0, 0)
+        self.distance_color = (255, 255, 255)
+        self.distance_outline_color = (0, 0, 0)
+        self.box_padding = 6.0
+        self.head_circle_radius = 6
+        self.box_outline_thickness = 3
+        self.skeleton_outline_thickness = 3
+        self.streamproof = False
+        self.vsync = False
+
+
+class robloxmemory:
+    def __init__(self):
+        self.process_handle = None
+        self.hwnd = None
+        self.process_id = None
+        self.base_address = None
+        self.data_model = None
+        self.visual_engine = None
+        self.workspace = None
+        self.players = None
+        self.local_player = None
+        self.camera = None
+        self._viewport_cache = None
+        self._viewport_cache_time = 0
+        if not self.find_roblox_process():
+            raise Exception("failed to find roblox process.")
+        self.initialize_game_data()
+    
+    def rescan(self):
+        try:
+            if self.process_handle:
+                try:
+                    ctypes.windll.kernel32.CloseHandle(self.process_handle)
+                except:
+                    pass
+            self.process_handle = None
+            self.hwnd = None
+            self.process_id = None
+            self.base_address = None
+            self.data_model = None
+            self.visual_engine = None
+            self.workspace = None
+            self.players = None
+            self.local_player = None
+            self.camera = None
+            self._viewport_cache = None
+            self._viewport_cache_time = 0
+            load_offsets()
+            if not self.find_roblox_process():
+                return False
+            self.initialize_game_data()
+            return True
+        except:
+            return False
+
+    def find_roblox_process(self):
+        try:
+            hwnd, pid = self.find_window_by_exe("RobloxPlayerBeta.exe")
+            if pid:
+                self.hwnd = hwnd
+                self.process_id = pid
+            else:
+                pid = self.get_process_id_by_psutil("RobloxPlayerBeta.exe")
+                if not pid:
+                    print("Roblox process not found")
+                    return False
+                self.process_id = pid
+                hwnd, _ = self.find_window_by_exe("RobloxPlayerBeta.exe")
+                self.hwnd = hwnd if hwnd else None
+            if not self.process_id:
+                print("Failed to get Roblox process ID")
+                return False
+            self.process_handle = ctypes.windll.kernel32.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, self.process_id)
+            if not self.process_handle:
+                print(f"Failed to open process. Error: {ctypes.windll.kernel32.GetLastError()}")
+                return False
+            self.base_address = self.get_module_address("RobloxPlayerBeta.exe")
+            if not self.base_address:
+                print("Failed to get base address")
+                ctypes.windll.kernel32.CloseHandle(self.process_handle)
+                return False
+            return True
+        except Exception as e:
+            print(f"Error in find_roblox_process: {e}")
+            traceback.print_exc()
+            return False
+
+    def find_window_by_exe(self, exe_name):
+        matches = []
+        def enum_proc(hwnd, _):
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                try:
+                    p = psutil.Process(pid)
+                    pname = (p.name() or "").lower()
+                    target = exe_name.lower()
+                    target_noexe = target[:-4] if target.endswith(".exe") else target
+                    if pname == target or pname == target_noexe:
+                        matches.append((hwnd, pid))
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                return True
+        try:
+            win32gui.EnumWindows(enum_proc, None)
+        except Exception:
+            pass
+        if matches:
+            for hwnd, pid in matches:
+                title = win32gui.GetWindowText(hwnd)
+                if title:
+                    return hwnd, pid
+            return matches[0]
+        return None, None
+
+    def get_process_id_by_psutil(self, process_name):
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if proc.info['name'].lower() == process_name.lower():
+                        return proc.info['pid']
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
+
+    def get_module_address(self, module_name):
+        if not getattr(self, 'process_handle', None):
+            return None
+        snapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x8 | 0x10, self.process_id)
+        if snapshot == -1:
+            return None
+        module_entry = MODULEENTRY32()
+        module_entry.dwSize = ctypes.sizeof(MODULEENTRY32)
+        if ctypes.windll.kernel32.Module32First(snapshot, ctypes.byref(module_entry)):
+            while True:
+                try:
+                    name = module_entry.szModule.decode().lower()
+                except Exception:
+                    name = ""
+                if module_name.lower() == name:
+                    ctypes.windll.kernel32.CloseHandle(snapshot)
+                    return ctypes.addressof(module_entry.modBaseAddr.contents)
+                if not ctypes.windll.kernel32.Module32Next(snapshot, ctypes.byref(module_entry)):
+                    break
+        ctypes.windll.kernel32.CloseHandle(snapshot)
+        return None
+
+    def read_memory(self, address, size):
+        buffer = ctypes.create_string_buffer(size)
+        bytes_read = ctypes.c_size_t()
+        result = ctypes.windll.kernel32.ReadProcessMemory(self.process_handle, ctypes.c_void_p(address), buffer, size, ctypes.byref(bytes_read))
+        if result and bytes_read.value > 0:
+            return buffer.raw[:bytes_read.value]
+        return None
+
+    def read_ptr(self, address):
+        data = self.read_memory(address, 8)
+        if data:
+            return int.from_bytes(data, byteorder='little')
+        return None
+
+    def read_int(self, address):
+        data = self.read_memory(address, 4)
+        if data:
+            return int.from_bytes(data, byteorder='little', signed=True)
+        return None
+
+    def read_int64(self, address):
+        data = self.read_memory(address, 8)
+        if data:
+            return struct.unpack('q', data)[0]
+        return None
+
+    def read_float(self, address):
+        data = self.read_memory(address, 4)
+        if data:
+            return struct.unpack('f', data)[0]
+        return None
+    
+    def write_float(self, address, value):
+        try:
+            data = struct.pack('f', float(value))
+            bytes_written = ctypes.c_size_t()
+            result = ctypes.windll.kernel32.WriteProcessMemory(
+                self.process_handle,
+                ctypes.c_void_p(address),
+                data,
+                len(data),
+                ctypes.byref(bytes_written)
+            )
+            return result != 0 and bytes_written.value == len(data)
+        except:
+            return False
+    
+    def read_vec3(self, address):
+        data = self.read_memory(address, 12)
+        if data:
+            return vec3(*struct.unpack('fff', data))
+        return None
+    
+    def write_vec3(self, address, vec):
+        try:
+            data = struct.pack('fff', float(vec.x), float(vec.y), float(vec.z))
+            bytes_written = ctypes.c_size_t()
+            result = ctypes.windll.kernel32.WriteProcessMemory(
+                self.process_handle,
+                ctypes.c_void_p(address),
+                data,
+                len(data),
+                ctypes.byref(bytes_written)
+            )
+            return result != 0 and bytes_written.value == len(data)
+        except:
+            return False
+
+    def read_string(self, address):
+        if not address:
+            return ""
+        str_length = self.read_int(address + 0x18)
+        if not str_length or str_length <= 0 or str_length > 1000: 
+            return ""
+        
+        data_address = address
+        if str_length >= 16:
+            data_address = self.read_ptr(address)
+            if not data_address:
+                return ""
+        
+        buffer = self.read_memory(data_address, str_length)
+        if not buffer:
+            return ""
+        
+        try:
+            null_index = buffer.find(b'\x00')
+            if null_index != -1:
+                buffer = buffer[:null_index]
+            return buffer.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                null_index = buffer.find(b'\x00')
+                if null_index != -1:
+                    buffer = buffer[:null_index]
+                return buffer.decode('latin-1')
+            except Exception:
+                return ""
+
+    def initialize_game_data(self):
+        try:
+            if "FakeDataModelPointer" not in OFFSETS_INT:
+                print("FakeDataModelPointer not found in offsets")
+                return
+            fake_data_model = self.read_ptr(self.base_address + OFFSETS_INT["FakeDataModelPointer"])
+            if not fake_data_model or fake_data_model == 0xFFFFFFFF:
+                print("Failed to read FakeDataModelPointer")
+                return
+            if "FakeDataModelToDataModel" not in OFFSETS_INT:
+                print("FakeDataModelToDataModel not found in offsets")
+                return
+            data_model_pointer = self.read_ptr(fake_data_model + OFFSETS_INT["FakeDataModelToDataModel"])
+            if not data_model_pointer or data_model_pointer == 0xFFFFFFFF:
+                print("Failed to read DataModelPointer")
+                return
+            retry_count = 0
+            data_model_name = ""
+            name_offset = OFFSETS_INT.get("Name", 0)
+            if not name_offset:
+                print("Name offset not found")
+                return
+            print("Waiting for DataModel...")
+            while retry_count < 30:
+                name_ptr = self.read_ptr(data_model_pointer + name_offset) if data_model_pointer else None
+                data_model_name = self.read_string(name_ptr) if name_ptr else ""
+                if data_model_name == "Ugc":
+                    break
+                retry_count += 1
+                time.sleep(0.5)
+                fake_data_model = self.read_ptr(self.base_address + OFFSETS_INT["FakeDataModelPointer"])
+                if fake_data_model:
+                    data_model_pointer = self.read_ptr(fake_data_model + OFFSETS_INT["FakeDataModelToDataModel"])
+            if data_model_name != "Ugc":
+                print(f"Failed to verify DataModel. Got: '{data_model_name}'")
+                return
+            print("DataModel found!")
+            self.data_model = data_model_pointer
+            if "VisualEnginePointer" not in OFFSETS_INT:
+                print("VisualEnginePointer not found in offsets")
+                return
+            self.visual_engine = self.read_ptr(self.base_address + OFFSETS_INT["VisualEnginePointer"])
+            if not self.visual_engine or self.visual_engine == 0xFFFFFFFF:
+                print("VisualEngine not found")
+                self.visual_engine = None
+                return
+            print("VisualEngine found!")
+            self.workspace = self.find_first_child_which_is_a(self.data_model, "Workspace") if self.data_model else None
+            self.players = self.find_first_child_which_is_a(self.data_model, "Players") if self.data_model else None
+            self.camera = self.find_first_child_which_is_a(self.workspace, "Camera") if self.workspace else None
+            if self.players:
+                if "LocalPlayer" not in OFFSETS_INT:
+                    print("LocalPlayer offset not found")
+                    return
+                local_player_ptr = self.read_ptr(self.players + OFFSETS_INT["LocalPlayer"])
+                if local_player_ptr:
+                    self.local_player = local_player_ptr
+                    print("LocalPlayer found!")
+                else:
+                    self.local_player = None
+            else:
+                self.local_player = None
+        except Exception as e:
+            print(f"Error in initialize_game_data: {e}")
+            traceback.print_exc()
+
+    def get_children(self, parent_address):
+        if not parent_address:
+            return []
+        children_ptr = self.read_ptr(parent_address + OFFSETS_INT["Children"])
+        if not children_ptr:
+            return []
+        container_data = self.read_memory(children_ptr, 16)
+        if not container_data or len(container_data) < 16:
+            return []
+        start_addr, end_addr = struct.unpack_from('<QQ', container_data, 0)
+        if not start_addr or not end_addr or start_addr >= end_addr:
+            return []
+        count = (end_addr - start_addr) // 8
+        if count <= 0 or count > 2048:
+            return []
+        data = self.read_memory(start_addr, count * 8)
+        if not data:
+            return []
+        children = []
+        try:
+            for i in range(count):
+                child_ptr = struct.unpack_from('<Q', data, i * 8)[0]
+                if child_ptr:
+                    children.append(child_ptr)
+            return children
+        except struct.error:
+            return []
+
+    def get_instance_name(self, address):
+        if not address:
+            return ""
+        name_ptr = self.read_ptr(address + OFFSETS_INT["Name"])
+        return self.read_string(name_ptr) if name_ptr else ""
+    
+    def get_instance_display_name(self, address):
+        if not address:
+            return ""
+        display_name_offset = OFFSETS_INT.get("DisplayName", 0)
+        if not display_name_offset:
+            return ""
+        display_name_ptr = self.read_ptr(address + display_name_offset)
+        return self.read_string(display_name_ptr) if display_name_ptr else ""
+
+    def get_instance_class(self, address):
+        if not address:
+            return ""
+        class_descriptor = self.read_ptr(address + OFFSETS_INT["ClassDescriptor"])
+        if class_descriptor:
+            class_name_ptr = self.read_ptr(class_descriptor + OFFSETS_INT["ClassDescriptorToClassName"])
+            return self.read_string(class_name_ptr) if class_name_ptr else ""
+        return ""
+
+    def find_first_child_which_is_a(self, parent_address, class_name):
+        children = self.get_children(parent_address)
+        for child in children:
+            if self.get_instance_class(child) == class_name:
+                return child
+        return None
+
+    def find_first_child_by_name(self, parent_address, name):
+        children = self.get_children(parent_address)
+        for child in children:
+            if self.get_instance_name(child) == name:
+                return child
+        return None
+
+    def read_matrix4(self, address):
+        data = self.read_memory(address, 64)
+        if data:
+            return struct.unpack('16f', data)
+        return None
+
+    def get_team(self, player_ptr):
+        if not player_ptr:
+            return None
+        team_offset = OFFSETS_INT.get("Team", 0)
+        if not team_offset:
+            return None
+        team_ptr = self.read_ptr(player_ptr + team_offset)
+        return team_ptr if team_ptr else None
+
+    def get_part_position(self, part_ptr):
+        if not part_ptr:
+            return None
+        primitive = self.read_ptr(part_ptr + OFFSETS_INT["Primitive"])
+        if not primitive:
+            return None
+        position_data = self.read_memory(primitive + OFFSETS_INT["Position"], 12)
+        if not position_data:
+            return None
+        return vec3(*struct.unpack('fff', position_data))
+
+    def get_player_tool(self, character_ptr):
+        if not character_ptr:
+            return None
+        try:
+            character_children = self.get_children(character_ptr)
+            for child in character_children:
+                class_name = self.get_instance_class(child)
+                if class_name in ["Tool", "HopperBin"]:
+                    tool_name = self.get_instance_name(child)
+                    if tool_name:
+                        return tool_name
+            return None
+        except Exception:
+            return None
+
+    def get_player_skeleton(self, character_ptr):
+        skeleton = {}
+        part_names_set = {"Head", "Torso", "UpperTorso", "LowerTorso", 
+                          "Left Arm", "LeftUpperArm", "LeftLowerArm", "LeftHand",
+                          "Right Arm", "RightUpperArm", "RightLowerArm", "RightHand",
+                          "Left Leg", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+                          "Right Leg", "RightUpperLeg", "RightLowerLeg", "RightFoot"}
+        children = self.get_children(character_ptr)
+        parts_to_get_pos = {}
+        for child_ptr in children:
+            name = self.get_instance_name(child_ptr)
+            if name in part_names_set:
+                parts_to_get_pos[name] = child_ptr
+                part_names_set.remove(name)
+                if not part_names_set:
+                    break
+        for name, part_ptr in parts_to_get_pos.items():
+            pos = self.get_part_position(part_ptr)
+            if pos:
+                skeleton[name] = pos
+        is_r15 = "LeftUpperArm" in skeleton or "RightUpperArm" in skeleton or "LeftUpperLeg" in skeleton or "RightUpperLeg" in skeleton
+
+        if not is_r15:
+            if "Torso" in skeleton and "UpperTorso" not in skeleton:
+                skeleton["UpperTorso"] = skeleton["Torso"]
+            if "Torso" in skeleton and "LowerTorso" not in skeleton:
+                torso_pos = skeleton["Torso"]
+                skeleton["LowerTorso"] = vec3(torso_pos.x, torso_pos.y - 0.5, torso_pos.z)
+            
+            if "Left Arm" in skeleton:
+                if "LeftUpperArm" not in skeleton:
+                    skeleton["LeftUpperArm"] = skeleton["Left Arm"]
+                if "LeftLowerArm" not in skeleton:
+                    arm_pos = skeleton["Left Arm"]
+                    skeleton["LeftLowerArm"] = vec3(arm_pos.x - 0.5, arm_pos.y - 1.0, arm_pos.z)
+                if "LeftHand" not in skeleton:
+                    if "LeftLowerArm" in skeleton:
+                        lower_arm = skeleton["LeftLowerArm"]
+                        skeleton["LeftHand"] = vec3(lower_arm.x - 0.3, lower_arm.y - 0.5, lower_arm.z)
+            
+            if "Right Arm" in skeleton:
+                if "RightUpperArm" not in skeleton:
+                    skeleton["RightUpperArm"] = skeleton["Right Arm"]
+                if "RightLowerArm" not in skeleton:
+                    arm_pos = skeleton["Right Arm"]
+                    skeleton["RightLowerArm"] = vec3(arm_pos.x + 0.5, arm_pos.y - 1.0, arm_pos.z)
+                if "RightHand" not in skeleton:
+                    if "RightLowerArm" in skeleton:
+                        lower_arm = skeleton["RightLowerArm"]
+                        skeleton["RightHand"] = vec3(lower_arm.x + 0.3, lower_arm.y - 0.5, lower_arm.z)
+            
+            if "Left Leg" in skeleton:
+                if "LeftUpperLeg" not in skeleton:
+                    skeleton["LeftUpperLeg"] = skeleton["Left Leg"]
+                if "LeftLowerLeg" not in skeleton:
+                    leg_pos = skeleton["Left Leg"]
+                    skeleton["LeftLowerLeg"] = vec3(leg_pos.x, leg_pos.y - 1.5, leg_pos.z)
+                if "LeftFoot" not in skeleton:
+                    if "LeftLowerLeg" in skeleton:
+                        lower_leg = skeleton["LeftLowerLeg"]
+                        skeleton["LeftFoot"] = vec3(lower_leg.x, lower_leg.y - 0.5, lower_leg.z)
+            
+            if "Right Leg" in skeleton:
+                if "RightUpperLeg" not in skeleton:
+                    skeleton["RightUpperLeg"] = skeleton["Right Leg"]
+                if "RightLowerLeg" not in skeleton:
+                    leg_pos = skeleton["Right Leg"]
+                    skeleton["RightLowerLeg"] = vec3(leg_pos.x, leg_pos.y - 1.5, leg_pos.z)
+                if "RightFoot" not in skeleton:
+                    if "RightLowerLeg" in skeleton:
+                        lower_leg = skeleton["RightLowerLeg"]
+                        skeleton["RightFoot"] = vec3(lower_leg.x, lower_leg.y - 0.5, lower_leg.z)
+        
+        return skeleton, is_r15
+
+    def get_player_coordinates(self):
+        if not getattr(self, 'players', None) or not getattr(self, 'local_player', None):
+            return []
+        coordinates = []
+        player_instances = self.get_children(self.players)
+        for player_ptr in player_instances:
+            if not player_ptr:
+                continue
+            if player_ptr == self.local_player:
+                continue
+            player_name = self.get_instance_name(player_ptr)
+            if not player_name:
+                continue
+            display_name = self.get_instance_display_name(player_ptr)
+            if not display_name:
+                display_name = player_name
+            character_ptr = self.read_ptr(player_ptr + OFFSETS_INT["ModelInstance"])
+            if not character_ptr:
+                continue
+            if self.get_instance_class(character_ptr) != "Model":
+                continue
+            humanoid_root_part = self.find_first_child_by_name(character_ptr, "HumanoidRootPart")
+            if not humanoid_root_part:
+                continue
+            if self.get_instance_class(humanoid_root_part) != "Part":
+                continue
+            position = self.get_part_position(humanoid_root_part)
+            if not position:
+                continue
+            skeleton, is_r15 = self.get_player_skeleton(character_ptr)
+            head_part = self.find_first_child_by_name(character_ptr, "Head")
+            head_pos = self.get_part_position(head_part) if head_part else None
+            if not head_pos:
+                head_pos = skeleton.get("Head") or vec3(position.x, position.y + 3.0, position.z)
+            humanoid = self.find_first_child_which_is_a(character_ptr, "Humanoid")
+            health = max_health = None
+            if humanoid:
+                health = self.read_float(humanoid + OFFSETS_INT["Health"])
+                max_health = self.read_float(humanoid + OFFSETS_INT["MaxHealth"])
+            tool_name = self.get_player_tool(character_ptr)
+            coordinates.append({
+                "player_name": player_name,
+                "display_name": display_name,
+                "root_pos": position,
+                "head_pos": head_pos,
+                "skeleton": skeleton,
+                "is_r15": is_r15,
+                "player_ptr": player_ptr,
+                "character_ptr": character_ptr,
+                "humanoid_root_part_ptr": humanoid_root_part,
+                "health": health,
+                "max_health": max_health,
+                "tool_name": tool_name
+            })
+        return coordinates
+
+    def get_window_viewport(self):
+        if not getattr(self, 'hwnd', None):
+            return vec2(1920, 1080)
+        current_time = time.time()
+        if self._viewport_cache and (current_time - self._viewport_cache_time) < 0.1:
+            return self._viewport_cache
+        try:
+            left, top, right, bottom = win32gui.GetClientRect(self.hwnd)
+            width = float(right - left)
+            height = float(bottom - top)
+            if width <= 0 or height <= 0:
+                rect = win32gui.GetWindowRect(self.hwnd)
+                width = float(rect[2] - rect[0])
+                height = float(rect[3] - rect[1])
+            self._viewport_cache = vec2(width, height)
+            self._viewport_cache_time = current_time
+            return self._viewport_cache
+        except Exception:
+            return vec2(1920, 1080)
+
+    def world_to_screen(self, pos):
+        if not getattr(self, 'visual_engine', None):
+            return vec2(-1, -1), None
+        try:
+            view_matrix = self.read_matrix4(self.visual_engine + OFFSETS_INT["viewmatrix"])
+            if not view_matrix:
+                return vec2(-1, -1), None
+            qx = pos.x * view_matrix[0] + pos.y * view_matrix[1] + pos.z * view_matrix[2] + view_matrix[3]
+            qy = pos.x * view_matrix[4] + pos.y * view_matrix[5] + pos.z * view_matrix[6] + view_matrix[7]
+            qz = pos.x * view_matrix[8] + pos.y * view_matrix[9] + pos.z * view_matrix[10] + view_matrix[11]
+            qw = pos.x * view_matrix[12] + pos.y * view_matrix[13] + pos.z * view_matrix[14] + view_matrix[15]
+            if qw < 0.1:
+                return vec2(-1, -1), None
+            ndc_x = qx / qw
+            ndc_y = qy / qw
+            viewport = self.get_window_viewport()
+            x = (viewport.x * 0.5) * (1.0 + ndc_x)
+            y = (viewport.y * 0.5) * (1.0 - ndc_y)
+            return vec2(x, y), abs(qw)
+        except Exception:
+            return vec2(-1, -1), None
+
+    def get_place_id(self):
+        if not getattr(self, 'data_model', None):
+            return None
+        try:
+            return self.read_int64(self.data_model + OFFSETS_INT["PlaceId"]) or None
+        except Exception:
+            return None
+    
+    def get_camera_position(self):
+        if not self.camera:
+            return None
+        try:
+            cframe_offset = OFFSETS_INT.get("CFrame", 0)
+            if not cframe_offset:
+                return None
+            cframe_data = self.read_memory(self.camera + cframe_offset, 48)
+            if cframe_data and len(cframe_data) >= 48:
+                position_data = cframe_data[12:24]
+                return vec3(*struct.unpack('fff', position_data))
+            return None
+        except:
+            return None
+    
+    def get_camera_cframe(self):
+        if not self.camera:
+            return None
+        try:
+            cframe_offset = OFFSETS_INT.get("CFrame", 0)
+            if not cframe_offset:
+                return None
+            cframe_data = self.read_memory(self.camera + cframe_offset, 48)
+            if cframe_data and len(cframe_data) >= 48:
+                return cframe_data
+            return None
+        except:
+            return None
+    
+
+
+class ESPOverlay:
+    def __init__(self, memory, config):
+        self.memory = memory
+        self.config = config
+        self.running = True
+        self.hwnd_overlay = None
+        self.hdc_overlay = None
+        self.hdc_mem = None
+        self.hbitmap = None
+        self.width = 0
+        self.height = 0
+        self.gdi32 = ctypes.windll.gdi32
+        self.user32 = ctypes.windll.user32
+        self.font_cache = None
+        self._needs_reinit = False
+        self.setup_overlay()
+
+    def cleanup_overlay(self):
+        try:
+            def enum_windows_callback(hwnd, windows):
+                try:
+                    class_name = win32gui.GetClassName(hwnd)
+                    window_text = win32gui.GetWindowText(hwnd)
+                    if "ESPOverlay" in window_text or "ESPOverlayClass" in class_name:
+                        windows.append(hwnd)
+                except:
+                    pass
+                return True
+            
+            all_esp_windows = []
+            win32gui.EnumWindows(enum_windows_callback, all_esp_windows)
+            
+            for hwnd in all_esp_windows:
+                try:
+                    if win32gui.IsWindow(hwnd):
+                        win32gui.DestroyWindow(hwnd)
+                except:
+                    pass
+            
+            if self.hbitmap:
+                try:
+                    self.gdi32.DeleteObject(self.hbitmap)
+                except:
+                    pass
+                self.hbitmap = None
+            if self.hdc_mem:
+                try:
+                    self.gdi32.DeleteDC(self.hdc_mem)
+                except:
+                    pass
+                self.hdc_mem = None
+            if self.hdc_overlay and self.hwnd_overlay:
+                try:
+                    if win32gui.IsWindow(self.hwnd_overlay):
+                        win32gui.ReleaseDC(self.hwnd_overlay, self.hdc_overlay)
+                except:
+                    pass
+                self.hdc_overlay = None
+            if self.hwnd_overlay:
+                try:
+                    if win32gui.IsWindow(self.hwnd_overlay):
+                        win32gui.DestroyWindow(self.hwnd_overlay)
+                except:
+                    pass
+                self.hwnd_overlay = None
+            self.width = 0
+            self.height = 0
+        except:
+            pass
+
+    def setup_overlay(self):
+        self.cleanup_overlay()
+        if not self.memory.hwnd:
+            return
+        try:
+            rect = win32gui.GetWindowRect(self.memory.hwnd)
+            self.width = rect[2] - rect[0]
+            self.height = rect[3] - rect[1]
+            
+            if self.width <= 0 or self.height <= 0:
+                return
+            
+            wc = win32gui.WNDCLASS()
+            wc.lpszClassName = "ESPOverlayClass"
+            wc.hInstance = win32api.GetModuleHandle(None)
+            wc.lpfnWndProc = win32gui.DefWindowProc
+            wc.hbrBackground = win32gui.GetStockObject(win32con.NULL_BRUSH)
+            wc.hCursor = win32gui.LoadCursor(0, win32con.IDC_ARROW)
+            wc.style = win32con.CS_HREDRAW | win32con.CS_VREDRAW
+            try:
+                class_atom = win32gui.RegisterClass(wc)
+            except:
+                try:
+                    class_info = win32gui.GetClassInfo(None, "ESPOverlayClass")
+                    if class_info and len(class_info) > 1:
+                        class_atom = class_info[1]
+                    else:
+                        wc.lpszClassName = "ESPOverlayClass2"
+                        class_atom = win32gui.RegisterClass(wc)
+                except:
+                    wc.lpszClassName = "ESPOverlayClass2"
+                    class_atom = win32gui.RegisterClass(wc)
+            
+            ex_style = win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST | win32con.WS_EX_NOACTIVATE
+            if self.config.streamproof:
+                try:
+                    ex_style |= 0x00200000
+                except:
+                    pass
+            self.hwnd_overlay = win32gui.CreateWindowEx(
+                ex_style,
+                class_atom,
+                "ESPOverlay",
+                win32con.WS_POPUP,
+                rect[0], rect[1], self.width, self.height,
+                None, None, win32api.GetModuleHandle(None), None
+            )
+            
+            if not self.hwnd_overlay:
+                return
+            
+            win32gui.SetLayeredWindowAttributes(self.hwnd_overlay, win32api.RGB(0, 0, 0), 0, win32con.LWA_COLORKEY)
+            win32gui.ShowWindow(self.hwnd_overlay, win32con.SW_SHOW)
+            win32gui.UpdateWindow(self.hwnd_overlay)
+            
+            self.hdc_overlay = win32gui.GetDC(self.hwnd_overlay)
+            if not self.hdc_overlay:
+                return
+                
+            self.hdc_mem = self.gdi32.CreateCompatibleDC(self.hdc_overlay)
+            if not self.hdc_mem:
+                return
+                
+            self.hbitmap = self.gdi32.CreateCompatibleBitmap(self.hdc_overlay, self.width, self.height)
+            if not self.hbitmap:
+                return
+                
+            self.gdi32.SelectObject(self.hdc_mem, self.hbitmap)
+            
+            try:
+                self.gdi32.SetGraphicsMode(self.hdc_mem, 2)
+                self.gdi32.SetBkMode(self.hdc_mem, win32con.TRANSPARENT)
+            except:
+                pass
+        except Exception:
+            pass
+
+    def draw_line(self, x1, y1, x2, y2, color):
+        pen = self.gdi32.CreatePen(win32con.PS_SOLID, 1, win32api.RGB(*color))
+        old_pen = self.gdi32.SelectObject(self.hdc_mem, pen)
+        self.gdi32.MoveToEx(self.hdc_mem, int(x1), int(y1), None)
+        self.gdi32.LineTo(self.hdc_mem, int(x2), int(y2))
+        self.gdi32.SelectObject(self.hdc_mem, old_pen)
+        self.gdi32.DeleteObject(pen)
+
+    def draw_rect(self, x, y, w, h, color):
+        pen = self.gdi32.CreatePen(win32con.PS_SOLID, 1, win32api.RGB(*color))
+        old_pen = self.gdi32.SelectObject(self.hdc_mem, pen)
+        brush = self.gdi32.GetStockObject(win32con.NULL_BRUSH)
+        old_brush = self.gdi32.SelectObject(self.hdc_mem, brush)
+        self.gdi32.Rectangle(self.hdc_mem, int(x), int(y), int(x + w), int(y + h))
+        self.gdi32.SelectObject(self.hdc_mem, old_brush)
+        self.gdi32.SelectObject(self.hdc_mem, old_pen)
+        self.gdi32.DeleteObject(pen)
+
+    def draw_box_2d(self, x, y, w, h, color, outline_color):
+        x1, y1 = int(x), int(y)
+        x2, y2 = int(x + w), int(y + h)
+        
+        outline_pen = self.gdi32.CreatePen(win32con.PS_SOLID, 3, win32api.RGB(*outline_color))
+        outline_old_pen = self.gdi32.SelectObject(self.hdc_mem, outline_pen)
+        outline_brush = self.gdi32.GetStockObject(win32con.NULL_BRUSH)
+        outline_old_brush = self.gdi32.SelectObject(self.hdc_mem, outline_brush)
+        
+        self.gdi32.MoveToEx(self.hdc_mem, x1 - 2, y1 - 2, None)
+        self.gdi32.LineTo(self.hdc_mem, x2 + 2, y1 - 2)
+        self.gdi32.LineTo(self.hdc_mem, x2 + 2, y2 + 2)
+        self.gdi32.LineTo(self.hdc_mem, x1 - 2, y2 + 2)
+        self.gdi32.LineTo(self.hdc_mem, x1 - 2, y1 - 2)
+        
+        self.gdi32.SelectObject(self.hdc_mem, outline_old_brush)
+        self.gdi32.SelectObject(self.hdc_mem, outline_old_pen)
+        self.gdi32.DeleteObject(outline_pen)
+        
+        main_pen = self.gdi32.CreatePen(win32con.PS_SOLID, 1, win32api.RGB(*color))
+        main_old_pen = self.gdi32.SelectObject(self.hdc_mem, main_pen)
+        main_brush = self.gdi32.GetStockObject(win32con.NULL_BRUSH)
+        main_old_brush = self.gdi32.SelectObject(self.hdc_mem, main_brush)
+        
+        self.gdi32.MoveToEx(self.hdc_mem, x1, y1, None)
+        self.gdi32.LineTo(self.hdc_mem, x2, y1)
+        self.gdi32.LineTo(self.hdc_mem, x2, y2)
+        self.gdi32.LineTo(self.hdc_mem, x1, y2)
+        self.gdi32.LineTo(self.hdc_mem, x1, y1)
+        
+        self.gdi32.SelectObject(self.hdc_mem, main_old_brush)
+        self.gdi32.SelectObject(self.hdc_mem, main_old_pen)
+        self.gdi32.DeleteObject(main_pen)
+
+    def draw_filled_rect(self, x, y, w, h, color):
+        brush = self.gdi32.CreateSolidBrush(win32api.RGB(*color))
+        old_brush = self.gdi32.SelectObject(self.hdc_mem, brush)
+        self.gdi32.Rectangle(self.hdc_mem, int(x), int(y), int(x + w), int(y + h))
+        self.gdi32.SelectObject(self.hdc_mem, old_brush)
+        self.gdi32.DeleteObject(brush)
+
+    def get_font(self):
+        if not self.font_cache:
+            self.font_cache = self.gdi32.CreateFontA(
+                14, 0, 0, 0, 700, 0, 0, 0,
+                win32con.DEFAULT_CHARSET,
+                win32con.OUT_DEFAULT_PRECIS,
+                win32con.CLIP_DEFAULT_PRECIS,
+                win32con.ANTIALIASED_QUALITY,
+                win32con.DEFAULT_PITCH | win32con.FF_DONTCARE,
+                "Arial".encode('ascii')
+            )
+        return self.font_cache
+
+    def get_text_size(self, text):
+        try:
+            font = self.get_font()
+            old_font = self.gdi32.SelectObject(self.hdc_mem, font)
+            text_bytes = text.encode('utf-8')
+            size = SIZE()
+            self.gdi32.GetTextExtentPoint32A(self.hdc_mem, text_bytes, len(text_bytes), ctypes.byref(size))
+            self.gdi32.SelectObject(self.hdc_mem, old_font)
+            return size.cx, size.cy
+        except Exception:
+            return len(text) * 8, 14
+
+    def draw_text_gdi(self, text, x, y, color=(255, 255, 255), outline_color=(0, 0, 0)):
+        try:
+            font = self.get_font()
+            old_font = self.gdi32.SelectObject(self.hdc_mem, font)
+            text_bytes = text.encode('utf-8')
+            self.gdi32.SetBkMode(self.hdc_mem, win32con.TRANSPARENT)
+            for dx in [-2, -1, 0, 1, 2]:
+                for dy in [-2, -1, 0, 1, 2]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    if abs(dx) + abs(dy) <= 2:
+                        self.gdi32.SetTextColor(self.hdc_mem, win32api.RGB(*outline_color))
+                        self.gdi32.TextOutA(self.hdc_mem, int(x + dx), int(y + dy), text_bytes, len(text_bytes))
+            self.gdi32.SetTextColor(self.hdc_mem, win32api.RGB(*color))
+            self.gdi32.TextOutA(self.hdc_mem, int(x), int(y), text_bytes, len(text_bytes))
+            self.gdi32.SelectObject(self.hdc_mem, old_font)
+        except Exception:
+            pass
+
+    def draw_skeleton(self, skeleton_screen, is_r15, avg_distance=None):
+        if "Head" not in skeleton_screen:
+            return
+        
+        if avg_distance and avg_distance > 2000:
+            return
+        
+        connections = []
+        if is_r15:
+            if "Head" in skeleton_screen and "UpperTorso" in skeleton_screen:
+                connections.append((skeleton_screen["Head"], skeleton_screen["UpperTorso"]))
+            
+            if "UpperTorso" in skeleton_screen:
+                if "LeftUpperArm" in skeleton_screen:
+                    connections.append((skeleton_screen["UpperTorso"], skeleton_screen["LeftUpperArm"]))
+                    if "LeftLowerArm" in skeleton_screen:
+                        connections.append((skeleton_screen["LeftUpperArm"], skeleton_screen["LeftLowerArm"]))
+                        if "LeftHand" in skeleton_screen:
+                            connections.append((skeleton_screen["LeftLowerArm"], skeleton_screen["LeftHand"]))
+                
+                if "RightUpperArm" in skeleton_screen:
+                    connections.append((skeleton_screen["UpperTorso"], skeleton_screen["RightUpperArm"]))
+                    if "RightLowerArm" in skeleton_screen:
+                        connections.append((skeleton_screen["RightUpperArm"], skeleton_screen["RightLowerArm"]))
+                        if "RightHand" in skeleton_screen:
+                            connections.append((skeleton_screen["RightLowerArm"], skeleton_screen["RightHand"]))
+            
+            torso_connector = skeleton_screen.get("LowerTorso") or skeleton_screen.get("UpperTorso")
+            
+            if torso_connector and "UpperTorso" in skeleton_screen and "LowerTorso" in skeleton_screen:
+                if torso_connector != skeleton_screen["UpperTorso"]:
+                    connections.append((skeleton_screen["UpperTorso"], torso_connector))
+            
+            if torso_connector:
+                if "LeftUpperLeg" in skeleton_screen:
+                    connections.append((torso_connector, skeleton_screen["LeftUpperLeg"]))
+                    if "LeftLowerLeg" in skeleton_screen:
+                        connections.append((skeleton_screen["LeftUpperLeg"], skeleton_screen["LeftLowerLeg"]))
+                        if "LeftFoot" in skeleton_screen:
+                            connections.append((skeleton_screen["LeftLowerLeg"], skeleton_screen["LeftFoot"]))
+                
+                if "RightUpperLeg" in skeleton_screen:
+                    connections.append((torso_connector, skeleton_screen["RightUpperLeg"]))
+                    if "RightLowerLeg" in skeleton_screen:
+                        connections.append((skeleton_screen["RightUpperLeg"], skeleton_screen["RightLowerLeg"]))
+                        if "RightFoot" in skeleton_screen:
+                            connections.append((skeleton_screen["RightLowerLeg"], skeleton_screen["RightFoot"]))
+        else:
+            if "Head" in skeleton_screen and "Torso" in skeleton_screen:
+                connections.append((skeleton_screen["Head"], skeleton_screen["Torso"]))
+            if "Torso" in skeleton_screen:
+                if "Left Arm" in skeleton_screen:
+                    connections.append((skeleton_screen["Torso"], skeleton_screen["Left Arm"]))
+                if "Right Arm" in skeleton_screen:
+                    connections.append((skeleton_screen["Torso"], skeleton_screen["Right Arm"]))
+                if "Left Leg" in skeleton_screen:
+                    connections.append((skeleton_screen["Torso"], skeleton_screen["Left Leg"]))
+                if "Right Leg" in skeleton_screen:
+                    connections.append((skeleton_screen["Torso"], skeleton_screen["Right Leg"]))
+
+        for start, end in connections:
+            if start[0] == -1 or start[1] == -1 or end[0] == -1 or end[1] == -1:
+                continue
+            dist = math.sqrt((start[0] - end[0])**2 + (start[1] - end[1])**2)
+            if dist > 2000:
+                continue
+            self.draw_line_outlined(start[0], start[1], end[0], end[1], self.config.skeleton_color, self.config.skeleton_outline_color, avg_distance)
+
+    def draw_circle(self, x, y, radius, color, outline_color):
+        x, y, radius = int(x), int(y), int(radius)
+        outline_pen = self.gdi32.CreatePen(win32con.PS_SOLID, 3, win32api.RGB(*outline_color))
+        outline_old_pen = self.gdi32.SelectObject(self.hdc_mem, outline_pen)
+        outline_brush = self.gdi32.GetStockObject(win32con.NULL_BRUSH)
+        outline_old_brush = self.gdi32.SelectObject(self.hdc_mem, outline_brush)
+        self.gdi32.Ellipse(self.hdc_mem, x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2)
+        self.gdi32.SelectObject(self.hdc_mem, outline_old_brush)
+        self.gdi32.SelectObject(self.hdc_mem, outline_old_pen)
+        self.gdi32.DeleteObject(outline_pen)
+        main_pen = self.gdi32.CreatePen(win32con.PS_SOLID, 1, win32api.RGB(*color))
+        main_old_pen = self.gdi32.SelectObject(self.hdc_mem, main_pen)
+        main_brush = self.gdi32.GetStockObject(win32con.NULL_BRUSH)
+        main_old_brush = self.gdi32.SelectObject(self.hdc_mem, main_brush)
+        self.gdi32.Ellipse(self.hdc_mem, x - radius, y - radius, x + radius, y + radius)
+        self.gdi32.SelectObject(self.hdc_mem, main_old_brush)
+        self.gdi32.SelectObject(self.hdc_mem, main_old_pen)
+        self.gdi32.DeleteObject(main_pen)
+
+    def draw_line_outlined(self, x1, y1, x2, y2, color, outline_color, distance=None):
+        min_thickness = 1
+        max_thickness = 3
+        if distance:
+            thickness = max(min_thickness, min(max_thickness, int(3.0 * (1000.0 / max(distance, 100.0)))))
+        else:
+            thickness = self.config.skeleton_outline_thickness
+        outline_pen = self.gdi32.CreatePen(win32con.PS_SOLID, thickness, win32api.RGB(*outline_color))
+        outline_old_pen = self.gdi32.SelectObject(self.hdc_mem, outline_pen)
+        self.gdi32.MoveToEx(self.hdc_mem, int(x1), int(y1), None)
+        self.gdi32.LineTo(self.hdc_mem, int(x2), int(y2))
+        self.gdi32.SelectObject(self.hdc_mem, outline_old_pen)
+        self.gdi32.DeleteObject(outline_pen)
+        main_pen = self.gdi32.CreatePen(win32con.PS_SOLID, 1, win32api.RGB(*color))
+        main_old_pen = self.gdi32.SelectObject(self.hdc_mem, main_pen)
+        self.gdi32.MoveToEx(self.hdc_mem, int(x1), int(y1), None)
+        self.gdi32.LineTo(self.hdc_mem, int(x2), int(y2))
+        self.gdi32.SelectObject(self.hdc_mem, main_old_pen)
+        self.gdi32.DeleteObject(main_pen)
+
+    def update(self):
+        if self._needs_reinit:
+            self.setup_overlay()
+            self._needs_reinit = False
+        if not self.hwnd_overlay or not self.memory.hwnd:
+            return
+        try:
+            if not win32gui.IsWindow(self.memory.hwnd):
+                return
+            try:
+                _, window_pid = win32process.GetWindowThreadProcessId(self.memory.hwnd)
+                if window_pid != self.memory.process_id:
+                    return
+            except Exception:
+                return
+            if win32gui.IsIconic(self.memory.hwnd):
+                if self.hwnd_overlay:
+                    win32gui.ShowWindow(self.hwnd_overlay, win32con.SW_HIDE)
+                return
+            if self.hwnd_overlay:
+                win32gui.ShowWindow(self.hwnd_overlay, win32con.SW_SHOW)
+            rect = win32gui.GetWindowRect(self.memory.hwnd)
+            width = rect[2] - rect[0]
+            height = rect[3] - rect[1]
+            if width <= 0 or height <= 0:
+                return
+            
+            if width != self.width or height != self.height:
+                self.width = width
+                self.height = height
+                if self.hbitmap:
+                    self.gdi32.DeleteObject(self.hbitmap)
+                if self.hdc_mem:
+                    self.gdi32.DeleteDC(self.hdc_mem)
+                if self.hwnd_overlay:
+                    win32gui.SetWindowPos(self.hwnd_overlay, win32con.HWND_TOPMOST, rect[0], rect[1], width, height, 0)
+                if self.hdc_overlay:
+                    self.hdc_mem = self.gdi32.CreateCompatibleDC(self.hdc_overlay)
+                    self.hbitmap = self.gdi32.CreateCompatibleBitmap(self.hdc_overlay, width, height)
+                    self.gdi32.SelectObject(self.hdc_mem, self.hbitmap)
+                    try:
+                        self.gdi32.SetGraphicsMode(self.hdc_mem, 2)
+                        self.gdi32.SetBkMode(self.hdc_mem, win32con.TRANSPARENT)
+                    except:
+                        pass
+            
+            if not self.hdc_mem:
+                return
+            
+            self.gdi32.PatBlt(self.hdc_mem, 0, 0, width, height, win32con.BLACKNESS)
+            
+            if not self.memory.data_model or not self.memory.players:
+                if self.hdc_overlay and self.hdc_mem:
+                    self.gdi32.BitBlt(self.hdc_overlay, 0, 0, width, height, self.hdc_mem, 0, 0, win32con.SRCCOPY)
+                return
+            players = self.memory.get_player_coordinates()
+            if players:
+                for player in players:
+                    skeleton = player["skeleton"]
+                    is_r15 = player["is_r15"]
+                    if not skeleton:
+                        continue
+                    
+                    skeleton_screen = {}
+                    all_screen_points = []
+                    distances = []
+                    head_y = None
+                    foot_y = None
+                    head_screen_pos = None
+
+                    for name, pos in skeleton.items():
+                        screen_pos, distance = self.memory.world_to_screen(pos)
+                        if screen_pos.x != -1 and screen_pos.y != -1:
+                            screen_x, screen_y = screen_pos.x, screen_pos.y
+                            skeleton_screen[name] = (screen_x, screen_y)
+                            all_screen_points.append((screen_x, screen_y))
+                            if distance:
+                                distances.append(distance)
+                            if name == "Head":
+                                if head_y is None or screen_y < head_y:
+                                    head_y = screen_y
+                                    head_screen_pos = (screen_x, screen_y)
+                            if name in ["LeftFoot", "RightFoot"]:
+                                if foot_y is None or screen_y > foot_y:
+                                    foot_y = screen_y
+
+                    if len(all_screen_points) < 2:
+                        continue 
+
+                    if head_y is None:
+                        head_y = min(p[1] for p in all_screen_points)
+                    if foot_y is None:
+                        foot_y = max(p[1] for p in all_screen_points)
+                    
+                    min_x = min(p[0] for p in all_screen_points)
+                    max_x = max(p[0] for p in all_screen_points)
+                    min_y = head_y
+                    max_y = foot_y
+                    
+                    padding = self.config.box_padding
+                    
+                    box_left = min_x - padding
+                    box_right = max_x + padding
+                    box_top = min_y - padding
+                    box_bottom = max_y + padding
+                    box_width = box_right - box_left
+                    box_height = box_bottom - box_top
+
+                    if box_width < 5 or box_height < 5:
+                        continue
+                    
+                    root_screen_pos, root_distance = self.memory.world_to_screen(player["root_pos"])
+                    avg_distance = sum(distances) / len(distances) if distances else (root_distance if root_distance else 1000.0)
+                    
+                    if self.config.enable_head_circle and head_screen_pos:
+                        head_screen_x, head_screen_y = head_screen_pos
+                        self.draw_circle(int(head_screen_x), int(head_screen_y), self.config.head_circle_radius, self.config.circle_color, self.config.circle_outline_color)
+
+                    if self.config.enable_box:
+                        self.draw_box_2d(box_left, box_top, box_width, box_height, self.config.box_color, self.config.box_outline_color)
+                    
+                    if self.config.enable_skeleton and skeleton_screen and len(skeleton_screen) >= 2:
+                        self.draw_skeleton(skeleton_screen, is_r15, avg_distance)
+                    
+                    if root_screen_pos.x != -1 and root_screen_pos.y != -1:
+                        root_center_x = root_screen_pos.x
+                        current_text_y = box_top - 18
+                        
+                        if self.config.enable_name:
+                            display_name = player.get("display_name", player.get("player_name", ""))
+                            name_text = display_name if display_name else player.get("player_name", "")
+                            name_text_width, name_text_height = self.get_text_size(name_text)
+                            name_text_start_x = root_center_x - (name_text_width / 2.0)
+                            self.draw_text_gdi(name_text, int(name_text_start_x), int(current_text_y), self.config.name_color, self.config.name_outline_color)
+                            current_text_y -= name_text_height + 3
+                        
+                        current_text_y = box_bottom + 3
+                        
+                        if self.config.enable_tool and player.get("tool_name"):
+                            tool_text = player["tool_name"]
+                            tool_text_width, tool_text_height = self.get_text_size(tool_text)
+                            tool_text_start_x = root_center_x - (tool_text_width / 2.0)
+                            self.draw_text_gdi(tool_text, int(tool_text_start_x), int(current_text_y), self.config.tool_color, self.config.tool_outline_color)
+                            current_text_y += tool_text_height + 2
+                        
+                        if self.config.enable_distance:
+                            distance_text = f"{int(avg_distance)}m"
+                            distance_text_width, distance_text_height = self.get_text_size(distance_text)
+                            distance_text_start_x = root_center_x - (distance_text_width / 2.0)
+                            self.draw_text_gdi(distance_text, int(distance_text_start_x), int(current_text_y), self.config.distance_color, self.config.distance_outline_color)
+
+                    if self.config.enable_health and player["health"] is not None and player["max_health"] is not None and player["max_health"] > 0:
+                        avg_distance = sum(distances) / len(distances) if distances else (root_distance if root_distance else 1000.0)
+                        distance_factor = max(0.5, min(1.5, 1000.0 / avg_distance)) if avg_distance > 0 else 1.0
+                        hp_bar_width = max(3, int(4 * distance_factor))
+                        bar_left_x = int(box_left - hp_bar_width - 3)
+                        bar_top_y = int(box_top)
+                        bar_height = int(box_height)
+                        health_pct = max(0.0, min(1.0, player["health"] / player["max_health"]))
+                        health_text = str(int(player['health']))
+                        health_color = (int(255 * (1 - health_pct)), int(255 * health_pct), 0)
+
+                        health_text_width, health_text_height = self.get_text_size(health_text)
+                        health_text_x = bar_left_x - health_text_width - 1
+                        health_text_y = bar_top_y
+                        self.draw_text_gdi(health_text, health_text_x, health_text_y, health_color, (0, 0, 0))
+
+                        self.draw_filled_rect(bar_left_x - 1, bar_top_y - 1, hp_bar_width + 2, bar_height + 2, (0, 0, 0))
+                        self.draw_filled_rect(bar_left_x, bar_top_y, hp_bar_width, bar_height, (80, 0, 0))
+                        
+                        current_health_height = int(bar_height * health_pct)
+                        current_health_y = bar_top_y + (bar_height - current_health_height)
+                        self.draw_filled_rect(bar_left_x, current_health_y, hp_bar_width, current_health_height, health_color)
+                        
+                        outline_pen = self.gdi32.CreatePen(0, 1, win32api.RGB(0, 0, 0))
+                        outline_old_pen = self.gdi32.SelectObject(self.hdc_mem, outline_pen)
+                        outline_brush = self.gdi32.GetStockObject(win32con.NULL_BRUSH)
+                        outline_old_brush = self.gdi32.SelectObject(self.hdc_mem, outline_brush)
+                        self.gdi32.Rectangle(self.hdc_mem, bar_left_x - 1, bar_top_y - 1, bar_left_x + hp_bar_width + 1, bar_top_y + bar_height + 1)
+                        self.gdi32.SelectObject(self.hdc_mem, outline_old_brush)
+                        self.gdi32.SelectObject(self.hdc_mem, outline_old_pen)
+                        self.gdi32.DeleteObject(outline_pen)
+            
+            if self.hdc_overlay and self.hdc_mem:
+                self.gdi32.BitBlt(self.hdc_overlay, 0, 0, width, height, self.hdc_mem, 0, 0, win32con.SRCCOPY)
+        except KeyboardInterrupt:
+            self.running = False
+        except Exception as e:
+            pass
+
+    def run(self):
+        try:
+            ctypes.windll.kernel32.SetThreadPriority(ctypes.windll.kernel32.GetCurrentThread(), 15)
+        except:
+            pass
+        last_time = time.time()
+        while self.running:
+            current_time = time.time()
+            if self.config.vsync:
+                target_fps = 60.0
+                frame_time = 1.0 / target_fps
+                elapsed = current_time - last_time
+                if elapsed < frame_time:
+                    time.sleep(frame_time - elapsed)
+                last_time = time.time()
+            else:
+                time.sleep(0.001)
+            self.update()
+        self.cleanup_overlay()
+        if self.font_cache:
+            self.gdi32.DeleteObject(self.font_cache)
+        if self.hbitmap:
+            self.gdi32.DeleteObject(self.hbitmap)
+        if self.hdc_mem:
+            self.gdi32.DeleteDC(self.hdc_mem)
+        if self.hdc_overlay:
+            win32gui.ReleaseDC(self.hwnd_overlay, self.hdc_overlay)
+        if self.hwnd_overlay:
+            win32gui.DestroyWindow(self.hwnd_overlay)
+
+
+class ESPMenu:
+    def __init__(self, config, memory, overlay):
+        self.config = config
+        self.memory = memory
+        self.overlay = overlay
+        self.root = tk.Tk()
+        self.root.title("ESP Settings")
+        self.root.geometry("600x900")
+        self.root.configure(bg="#1e1e1e")
+        self.setup_ui()
+
+    def color_picker(self, parent, title, var_r, var_g, var_b):
+        frame = tk.Frame(parent, bg="#1e1e1e")
+        frame.pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(frame, text=title, bg="#1e1e1e", fg="white", font=("Arial", 9)).pack(side=tk.LEFT)
+        tk.Scale(frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=var_r, bg="#2d2d2d", fg="white", troughcolor="#3d3d3d", length=120, command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Scale(frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=var_g, bg="#2d2d2d", fg="white", troughcolor="#3d3d3d", length=120, command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Scale(frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=var_b, bg="#2d2d2d", fg="white", troughcolor="#3d3d3d", length=120, command=self.update_config).pack(side=tk.LEFT, padx=5)
+
+    def setup_ui(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TFrame", background="#1e1e1e")
+        style.configure("TCheckbutton", background="#1e1e1e", foreground="white")
+        
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(main_frame, text="ESP Settings", bg="#1e1e1e", fg="#00ff00", font=("Arial", 16, "bold")).pack(pady=10)
+        
+        enable_frame = tk.Frame(main_frame, bg="#1e1e1e")
+        enable_frame.pack(fill=tk.X, pady=10)
+        
+        self.var_box = tk.BooleanVar(value=self.config.enable_box)
+        self.var_skeleton = tk.BooleanVar(value=self.config.enable_skeleton)
+        self.var_head_circle = tk.BooleanVar(value=self.config.enable_head_circle)
+        self.var_name = tk.BooleanVar(value=self.config.enable_name)
+        self.var_health = tk.BooleanVar(value=self.config.enable_health)
+        self.var_tool = tk.BooleanVar(value=self.config.enable_tool)
+        self.var_distance = tk.BooleanVar(value=self.config.enable_distance)
+        self.var_streamproof = tk.BooleanVar(value=self.config.streamproof)
+        self.var_vsync = tk.BooleanVar(value=self.config.vsync)
+        
+        tk.Checkbutton(enable_frame, text="Box", variable=self.var_box, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(enable_frame, text="Skeleton", variable=self.var_skeleton, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(enable_frame, text="Head Circle", variable=self.var_head_circle, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(enable_frame, text="Name", variable=self.var_name, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(enable_frame, text="Health", variable=self.var_health, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(enable_frame, text="Tool", variable=self.var_tool, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(enable_frame, text="Distance", variable=self.var_distance, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=5)
+        
+        settings_frame = tk.Frame(main_frame, bg="#1e1e1e")
+        settings_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        self.var_box_r = tk.IntVar(value=self.config.box_color[0])
+        self.var_box_g = tk.IntVar(value=self.config.box_color[1])
+        self.var_box_b = tk.IntVar(value=self.config.box_color[2])
+        self.color_picker(settings_frame, "Box Color:", self.var_box_r, self.var_box_g, self.var_box_b)
+        
+        self.var_skeleton_r = tk.IntVar(value=self.config.skeleton_color[0])
+        self.var_skeleton_g = tk.IntVar(value=self.config.skeleton_color[1])
+        self.var_skeleton_b = tk.IntVar(value=self.config.skeleton_color[2])
+        self.color_picker(settings_frame, "Skeleton Color:", self.var_skeleton_r, self.var_skeleton_g, self.var_skeleton_b)
+        
+        self.var_circle_r = tk.IntVar(value=self.config.circle_color[0])
+        self.var_circle_g = tk.IntVar(value=self.config.circle_color[1])
+        self.var_circle_b = tk.IntVar(value=self.config.circle_color[2])
+        self.color_picker(settings_frame, "Circle Color:", self.var_circle_r, self.var_circle_g, self.var_circle_b)
+        
+        self.var_name_r = tk.IntVar(value=self.config.name_color[0])
+        self.var_name_g = tk.IntVar(value=self.config.name_color[1])
+        self.var_name_b = tk.IntVar(value=self.config.name_color[2])
+        self.color_picker(settings_frame, "Name Color:", self.var_name_r, self.var_name_g, self.var_name_b)
+        
+        self.var_tool_r = tk.IntVar(value=self.config.tool_color[0])
+        self.var_tool_g = tk.IntVar(value=self.config.tool_color[1])
+        self.var_tool_b = tk.IntVar(value=self.config.tool_color[2])
+        self.color_picker(settings_frame, "Tool Color:", self.var_tool_r, self.var_tool_g, self.var_tool_b)
+        
+        self.var_distance_r = tk.IntVar(value=self.config.distance_color[0])
+        self.var_distance_g = tk.IntVar(value=self.config.distance_color[1])
+        self.var_distance_b = tk.IntVar(value=self.config.distance_color[2])
+        self.color_picker(settings_frame, "Distance Color:", self.var_distance_r, self.var_distance_g, self.var_distance_b)
+        
+        padding_frame = tk.Frame(settings_frame, bg="#1e1e1e")
+        padding_frame.pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(padding_frame, text="Box Padding:", bg="#1e1e1e", fg="white").pack(side=tk.LEFT)
+        self.var_padding = tk.DoubleVar(value=self.config.box_padding)
+        tk.Scale(padding_frame, from_=0, to=20, orient=tk.HORIZONTAL, variable=self.var_padding, bg="#2d2d2d", fg="white", troughcolor="#3d3d3d", length=200, command=self.update_config).pack(side=tk.LEFT, padx=10)
+        
+        radius_frame = tk.Frame(settings_frame, bg="#1e1e1e")
+        radius_frame.pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(radius_frame, text="Head Circle Radius:", bg="#1e1e1e", fg="white").pack(side=tk.LEFT)
+        self.var_radius = tk.IntVar(value=self.config.head_circle_radius)
+        tk.Scale(radius_frame, from_=3, to=15, orient=tk.HORIZONTAL, variable=self.var_radius, bg="#2d2d2d", fg="white", troughcolor="#3d3d3d", length=200, command=self.update_config).pack(side=tk.LEFT, padx=10)
+        
+        options_frame = tk.Frame(settings_frame, bg="#1e1e1e")
+        options_frame.pack(fill=tk.X, padx=10, pady=10)
+        tk.Checkbutton(options_frame, text="Streamproof", variable=self.var_streamproof, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.toggle_streamproof).pack(side=tk.LEFT, padx=10)
+        tk.Checkbutton(options_frame, text="V-Sync", variable=self.var_vsync, bg="#1e1e1e", fg="white", selectcolor="#2d2d2d", command=self.update_config).pack(side=tk.LEFT, padx=10)
+        
+        button_frame = tk.Frame(main_frame, bg="#1e1e1e")
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        tk.Button(button_frame, text="Rescan Game", command=self.rescan_game, bg="#2d2d2d", fg="white", font=("Arial", 10), width=12, height=2).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Reload Offsets", command=self.reload_offsets, bg="#2d2d2d", fg="white", font=("Arial", 10), width=12, height=2).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Unload", command=self.unload, bg="#8b0000", fg="white", font=("Arial", 10), width=12, height=2).pack(side=tk.LEFT, padx=5)
+        
+        self.update_config()
+
+    def update_config(self, *args):
+        self.config.enable_box = self.var_box.get()
+        self.config.enable_skeleton = self.var_skeleton.get()
+        self.config.enable_head_circle = self.var_head_circle.get()
+        self.config.enable_name = self.var_name.get()
+        self.config.enable_health = self.var_health.get()
+        self.config.enable_tool = self.var_tool.get()
+        self.config.enable_distance = self.var_distance.get()
+        self.config.vsync = self.var_vsync.get()
+        self.config.box_color = (self.var_box_r.get(), self.var_box_g.get(), self.var_box_b.get())
+        self.config.skeleton_color = (self.var_skeleton_r.get(), self.var_skeleton_g.get(), self.var_skeleton_b.get())
+        self.config.circle_color = (self.var_circle_r.get(), self.var_circle_g.get(), self.var_circle_b.get())
+        self.config.name_color = (self.var_name_r.get(), self.var_name_g.get(), self.var_name_b.get())
+        self.config.tool_color = (self.var_tool_r.get(), self.var_tool_g.get(), self.var_tool_b.get())
+        self.config.distance_color = (self.var_distance_r.get(), self.var_distance_g.get(), self.var_distance_b.get())
+        self.config.box_padding = self.var_padding.get()
+        self.config.head_circle_radius = self.var_radius.get()
+
+    def toggle_streamproof(self):
+        self.config.streamproof = self.var_streamproof.get()
+        if self.overlay.hwnd_overlay:
+            self.overlay._needs_reinit = True
+
+    def rescan_game(self):
+        self.overlay.cleanup_overlay()
+        time.sleep(0.2)
+        if self.memory.rescan():
+            self.overlay._needs_reinit = True
+    
+    def reload_offsets(self):
+        try:
+            if load_offsets():
+                self.overlay.cleanup_overlay()
+                time.sleep(0.2)
+                if self.memory.rescan():
+                    self.overlay._needs_reinit = True
+                    print("Offsets reloaded and rescan successful!")
+                else:
+                    print("Offsets reloaded but rescan failed!")
+            else:
+                print("Failed to reload offsets!")
+        except Exception as e:
+            print(f"Reload offsets error: {e}")
+            traceback.print_exc()
+
+    def unload(self):
+        self.overlay.running = False
+        self.root.quit()
+
+    def run(self):
+        self.root.mainloop()
+
+
+def main():
+    try:
+        config = ESPConfig()
+        try:
+            memory = robloxmemory()
+        except Exception as e:
+            print(f"Failed to initialize memory: {e}")
+            traceback.print_exc()
+            input("Press Enter to exit...")
+            return
+        
+        try:
+            overlay = ESPOverlay(memory, config)
+        except Exception as e:
+            print(f"Failed to initialize overlay: {e}")
+            traceback.print_exc()
+            input("Press Enter to exit...")
+            return
+        
+        def overlay_thread():
+            try:
+                overlay.run()
+            except Exception as e:
+                print(f"Overlay thread error: {e}")
+                traceback.print_exc()
+        
+        def menu_thread():
+            try:
+                menu = ESPMenu(config, memory, overlay)
+                menu.run()
+            except Exception as e:
+                print(f"Menu thread error: {e}")
+                traceback.print_exc()
+        
+        t1 = threading.Thread(target=overlay_thread, daemon=True)
+        t2 = threading.Thread(target=menu_thread, daemon=False)
+        t1.start()
+        t2.start()
+        t2.join()
+    except Exception as e:
+        print(f"Main error: {e}")
+        traceback.print_exc()
+        input("Press Enter to exit...")
+
+
+if __name__ == "__main__":
+    main()
